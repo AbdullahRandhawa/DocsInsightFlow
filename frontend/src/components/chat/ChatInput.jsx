@@ -1,0 +1,121 @@
+import { useRef, useState, useEffect } from "react";
+import { Send, Loader2, Paperclip, FileText, X, Settings } from "lucide-react";
+
+export function ChatInput({ onSend, onUploadClick, onSettingsClick, disabled, documents = [] }) {
+  const [value, setValue] = useState("");
+  const [selectedFileId, setSelectedFileId] = useState(null);
+  const textareaRef = useRef(null);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    }
+  }, [value]);
+
+  const handleSend = () => {
+    const trimmed = value.trim();
+    if (!trimmed || disabled) return;
+    onSend(trimmed, selectedFileId || null);
+    setValue("");
+    setSelectedFileId(null);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const toggleFile = (fileId) => {
+    setSelectedFileId((prev) => (prev === fileId ? null : fileId));
+  };
+
+  const hasDocuments = documents.length > 0;
+  const canSend = value.trim().length > 0 && !disabled && hasDocuments;
+  const placeholder = !hasDocuments
+    ? "Upload a document first..."
+    : disabled
+    ? "Generating answer..."
+    : "Ask a question about your documents...";
+
+  return (
+    <div className="chat-input-area">
+      {/* File pills — clickable to filter query to a specific file */}
+      {hasDocuments && (
+        <div className="input-file-pills">
+          {documents.map((doc) => {
+            const isActive = selectedFileId === doc.doc_id;
+            return (
+              <button
+                key={doc.doc_id}
+                className={`input-file-pill ${isActive ? "active" : ""}`}
+                onClick={() => toggleFile(doc.doc_id)}
+                title={isActive ? "Click to search all docs" : `Search only in ${doc.file_name}`}
+                type="button"
+              >
+                <FileText size={11} />
+                <span>{doc.file_name.length > 22 ? doc.file_name.slice(0, 22) + "…" : doc.file_name}</span>
+                {isActive && <X size={10} />}
+              </button>
+            );
+          })}
+          {selectedFileId && (
+            <span className="input-file-hint">Searching in selected file only</span>
+          )}
+        </div>
+      )}
+
+      <div className="chat-input-wrapper">
+        {/* Attach button */}
+        <div className="chat-attach-btn-wrapper" title="Upload PDF, TXT or DOCX">
+          <button
+            id="upload-trigger-btn"
+            className="chat-attach-btn"
+            onClick={onUploadClick}
+            disabled={disabled}
+            type="button"
+          >
+            <Paperclip size={16} />
+          </button>
+        </div>
+
+        <textarea
+          ref={textareaRef}
+          id="chat-input"
+          className="chat-textarea"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          rows={1}
+          disabled={disabled || !hasDocuments}
+        />
+
+        <div className="chat-input-actions">
+          <button
+            type="button"
+            className="chat-attach-btn"
+            onClick={onSettingsClick}
+            title="Query Settings"
+          >
+            <Settings size={16} />
+          </button>
+          
+          <button
+            id="send-btn"
+            className="chat-send-btn"
+            onClick={handleSend}
+            disabled={!canSend}
+            title="Send"
+          >
+            {disabled ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
