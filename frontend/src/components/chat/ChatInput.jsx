@@ -35,9 +35,9 @@ export function ChatInput({ onSend, onUploadClick, onSettingsClick, disabled, do
   };
 
   const hasDocuments = documents.length > 0;
-  const canSend = value.trim().length > 0 && !disabled && hasDocuments;
+  const canSend = value.trim().length > 0 && !disabled;
   const placeholder = !hasDocuments
-    ? "Upload a document first..."
+    ? "Say hi, or click the paperclip to upload a document..."
     : disabled
     ? "Generating answer..."
     : "Ask a question about your documents...";
@@ -53,13 +53,15 @@ export function ChatInput({ onSend, onUploadClick, onSettingsClick, disabled, do
               <button
                 key={doc.doc_id}
                 className={`input-file-pill ${isActive ? "active" : ""}`}
-                onClick={() => toggleFile(doc.doc_id)}
-                title={isActive ? "Click to search all docs" : `Search only in ${doc.file_name}`}
+                onClick={() => doc.status !== "processing" && toggleFile(doc.doc_id)}
+                title={doc.status === "processing" ? "Document is processing..." : isActive ? "Click to search all docs" : `Search only in ${doc.file_name}`}
                 type="button"
+                disabled={doc.status === "processing"}
               >
                 <FileText size={11} />
                 <span>{doc.file_name.length > 22 ? doc.file_name.slice(0, 22) + "…" : doc.file_name}</span>
-                {isActive && <X size={10} />}
+                {doc.status === "processing" && <Loader2 size={11} className="spin" style={{ marginLeft: 4 }} />}
+                {isActive && doc.status !== "processing" && <X size={10} />}
               </button>
             );
           })}
@@ -92,7 +94,7 @@ export function ChatInput({ onSend, onUploadClick, onSettingsClick, disabled, do
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           rows={1}
-          disabled={disabled || !hasDocuments}
+          disabled={disabled}
         />
 
         <div className="chat-input-actions">

@@ -4,7 +4,25 @@ import { chatApi } from "../../lib/api";
 import { useState } from "react";
 import toast from "react-hot-toast";
 
-export function Sidebar({ chats, activeChatId, onSelectChat, onNewChat, onDeleteChat, loading }) {
+function formatChatTime(isoString) {
+  if (!isoString) return "";
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } else if (diffDays === 1) {
+    return "Yesterday";
+  } else if (diffDays < 7) {
+    return date.toLocaleDateString([], { weekday: "short" });
+  } else {
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+}
+
+export function Sidebar({ chats, activeChatId, pendingNewChat, onSelectChat, onNewChat, onDeleteChat, loading }) {
   const { user, logout } = useAuth();
   const [deletingId, setDeletingId] = useState(null);
 
@@ -45,7 +63,11 @@ export function Sidebar({ chats, activeChatId, onSelectChat, onNewChat, onDelete
 
       {/* New Chat Button */}
       <div style={{ padding: "0 var(--space-3)" }}>
-        <button className="sidebar-new-chat" onClick={onNewChat} id="new-chat-btn">
+        <button
+          className={`sidebar-new-chat ${pendingNewChat ? "active" : ""}`}
+          onClick={onNewChat}
+          id="new-chat-btn"
+        >
           <Plus size={16} />
           New Chat
         </button>
@@ -69,7 +91,7 @@ export function Sidebar({ chats, activeChatId, onSelectChat, onNewChat, onDelete
             {chats.map((chat) => (
               <div
                 key={chat.chat_id}
-                className={`sidebar-chat-item ${activeChatId === chat.chat_id ? "active" : ""}`}
+                className={`sidebar-chat-item ${activeChatId === chat.chat_id ? "active" : ""} ${deletingId === chat.chat_id ? "deleting" : ""}`}
                 onClick={() => onSelectChat(chat.chat_id)}
                 id={`chat-item-${chat.chat_id}`}
               >
@@ -77,11 +99,20 @@ export function Sidebar({ chats, activeChatId, onSelectChat, onNewChat, onDelete
                 <div className="sidebar-chat-item-content">
                   <div className="sidebar-chat-item-title">{chat.title}</div>
                   <div className="sidebar-chat-item-meta">
-                    {chat.document_count} doc{chat.document_count !== 1 ? "s" : ""}
+                    <span>{chat.document_count} doc{chat.document_count !== 1 ? "s" : ""}</span>
+                    {chat.updated_at && (
+                      <span className="sidebar-chat-timestamp">
+                        {formatChatTime(chat.updated_at)}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
                   className="sidebar-chat-item-delete"
+                  style={{
+                    opacity: deletingId === chat.chat_id ? 1 : undefined,
+                    pointerEvents: deletingId === chat.chat_id ? "none" : undefined,
+                  }}
                   onClick={(e) => handleDelete(e, chat.chat_id)}
                   disabled={deletingId === chat.chat_id}
                   title="Delete chat"

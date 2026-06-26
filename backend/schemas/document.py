@@ -10,6 +10,7 @@ class DocumentUploadResponse(BaseModel):
     chunk_size: int
     cloudinary_url: str
     uploaded_at: str
+    status: str = "processing"
 
 
 class DocumentInfo(BaseModel):

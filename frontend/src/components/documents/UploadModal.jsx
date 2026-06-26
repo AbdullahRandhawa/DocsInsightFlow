@@ -1,8 +1,7 @@
 import { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, X, FileText, AlertCircle } from "lucide-react";
+import { Upload, X, FileText } from "lucide-react";
 import { documentsApi } from "../../lib/api";
-import { Spinner } from "../ui/Spinner";
 import toast from "react-hot-toast";
 
 const MAX_DOCS = 3;
@@ -11,8 +10,6 @@ const MAX_SIZE_MB = 20;
 export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
   const [chunkSize, setChunkSize] = useState(500);
   const [selectedFile, setSelectedFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState("");
 
   const onDrop = useCallback((accepted, rejected) => {
     if (rejected.length > 0) {
@@ -31,27 +28,36 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
     },
     maxSize: MAX_SIZE_MB * 1024 * 1024,
     maxFiles: 1,
-    disabled: uploading,
   });
 
   const handleUpload = async () => {
-    if (!selectedFile || uploading) return;
-    setUploading(true);
-    setProgress("Uploading...");
+    if (!selectedFile) return;
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+    formData.append("chunk_size", chunkSize);
+
+    // Close the modal immediately — don't make user wait
+    onDocumentAdded({
+      doc_id: `temp_${Date.now()}`,
+      file_name: selectedFile.name,
+      page_count: 0,
+      chunk_count: 0,
+      chunk_size: chunkSize,
+      cloudinary_url: "",
+      uploaded_at: new Date().toISOString(),
+      status: "processing",
+    });
+    onClose();
+
+    // Fire upload in background
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-      formData.append("chunk_size", chunkSize);
-      setProgress("Extracting & embedding text...");
       const res = await documentsApi.upload(chatId, formData);
+      // Replace temp doc with the real one from the server
       onDocumentAdded(res.data);
-      toast.success(`"${selectedFile.name}" processed — ${res.data.chunk_count} chunks`);
-      onClose();
+      toast.success(`"${selectedFile.name}" uploaded — processing in background`);
     } catch (err) {
       toast.error(err.message || "Upload failed");
-    } finally {
-      setUploading(false);
-      setProgress("");
     }
   };
 
@@ -63,7 +69,7 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
         {/* Header */}
         <div className="modal-header">
           <span className="modal-title">Upload Document</span>
-          <button className="btn-icon" onClick={onClose} disabled={uploading}>
+          <button className="btn-icon" onClick={onClose}>
             <X size={16} />
           </button>
         </div>
@@ -81,7 +87,6 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
               <button
                 className="modal-file-clear"
                 onClick={(e) => { e.stopPropagation(); setSelectedFile(null); }}
-                disabled={uploading}
               >
                 <X size={13} />
               </button>
@@ -108,7 +113,6 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
             value={chunkSize}
             onChange={(e) => setChunkSize(Number(e.target.value))}
             className="chunk-slider"
-            disabled={uploading}
           />
           <div className="modal-settings-range">
             <span>100</span><span>1000</span>
@@ -117,15 +121,15 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
 
         {/* Actions */}
         <div className="modal-actions">
-          <button className="btn btn-secondary" onClick={onClose} disabled={uploading}>
+          <button className="btn btn-secondary" onClick={onClose}>
             Cancel
           </button>
           <button
             className="btn btn-primary"
             onClick={handleUpload}
-            disabled={!selectedFile || uploading}
+            disabled={!selectedFile}
           >
-            {uploading ? <><Spinner size="sm" />{progress}</> : "Upload"}
+            Upload
           </button>
         </div>
       </div>

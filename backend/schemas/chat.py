@@ -38,6 +38,7 @@ class SourceReference(BaseModel):
     page: int
     score: float
     excerpt: str  # First 300 chars of the chunk
+    full_text: Optional[str] = None
 
 
 class QueryResponse(BaseModel):

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { SourceCard } from "./SourceCard";
-import { AlertTriangle, Copy, RotateCcw, BookOpen, Check } from "lucide-react";
+import { Copy, RotateCcw, BookOpen, Check } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export function MessageBubble({ message, onRetry }) {
   const isUser = message.role === "user";
@@ -15,41 +17,99 @@ export function MessageBubble({ message, onRetry }) {
 
   const hasSources = !isUser && message.sources && message.sources.length > 0;
 
-  return (
-    <div className={`message-row ${isUser ? "user" : "assistant"}`} id={`msg-${message.message_id}`}>
-      <div style={{ display: "flex", flexDirection: "column", maxWidth: isUser ? "72%" : "100%" }}>
-        <div className={`message-bubble ${isUser ? "user" : "assistant"}`}>
-          {message.content.split("\n").map((line, i) =>
-            line ? <p key={i}>{line}</p> : <br key={i} />
-          )}
-        </div>
-
-        {/* No context banner */}
-        {!isUser && message.has_context === false && (
-          <div className="no-context-banner">
-            <AlertTriangle size={12} />
-            No relevant context found in documents for this query
+  if (isUser) {
+    return (
+      <div className="message-row user" id={`msg-${message.message_id}`}>
+        <div className="user-message-wrapper">
+          <div className="user-message-bubble">
+            {message.content}
           </div>
-        )}
+          <div className="msg-actions user-msg-actions">
+            <button className="msg-action-btn" onClick={handleCopy} title="Copy">
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              <span>{copied ? "Copied" : "Copy"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-        {/* Action bar — only for assistant messages */}
-        {!isUser && (
-          <div className="msg-actions">
-            <button
-              className="msg-action-btn"
-              onClick={handleCopy}
-              title="Copy"
+  // Assistant message — no bubble, modern flat style with markdown
+  return (
+    <div className="message-row assistant" id={`msg-${message.message_id}`}>
+      <div className="assistant-message-wrapper">
+        <div className="assistant-ai-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/>
+          </svg>
+        </div>
+        <div className="assistant-content">
+          <div className="assistant-markdown">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                code({ node, className, children, ...props }) {
+                  const match = /language-(\w+)/.exec(className || "");
+                  const isBlock = match || String(children).includes("\n");
+                  if (isBlock) {
+                    return (
+                      <div className="code-block-wrapper">
+                        <div className="code-block-header">
+                          <span className="code-block-lang">{match ? match[1] : "code"}</span>
+                          <button
+                            className="code-block-copy"
+                            onClick={() => navigator.clipboard.writeText(String(children).replace(/\n$/, ""))}
+                          >
+                            <Copy size={12} /> Copy
+                          </button>
+                        </div>
+                        <pre className="code-block"><code className={className} {...props}>{children}</code></pre>
+                      </div>
+                    );
+                  }
+                  return <code className="inline-code" {...props}>{children}</code>;
+                },
+                table({ children }) {
+                  return <div className="md-table-wrapper"><table className="md-table">{children}</table></div>;
+                },
+                th({ children }) {
+                  return <th className="md-th">{children}</th>;
+                },
+                td({ children }) {
+                  return <td className="md-td">{children}</td>;
+                },
+                blockquote({ children }) {
+                  return <blockquote className="md-blockquote">{children}</blockquote>;
+                },
+                ul({ children }) {
+                  return <ul className="md-ul">{children}</ul>;
+                },
+                ol({ children }) {
+                  return <ol className="md-ol">{children}</ol>;
+                },
+                li({ children }) {
+                  return <li className="md-li">{children}</li>;
+                },
+                h1({ children }) { return <h1 className="md-h1">{children}</h1>; },
+                h2({ children }) { return <h2 className="md-h2">{children}</h2>; },
+                h3({ children }) { return <h3 className="md-h3">{children}</h3>; },
+                p({ children }) { return <p className="md-p">{children}</p>; },
+              }}
             >
+              {message.content}
+            </ReactMarkdown>
+          </div>
+
+          {/* Action bar */}
+          <div className="msg-actions assistant-actions">
+            <button className="msg-action-btn" onClick={handleCopy} title="Copy">
               {copied ? <Check size={13} /> : <Copy size={13} />}
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
 
             {onRetry && (
-              <button
-                className="msg-action-btn"
-                onClick={onRetry}
-                title="Try again"
-              >
+              <button className="msg-action-btn" onClick={onRetry} title="Try again">
                 <RotateCcw size={13} />
                 <span>Try again</span>
               </button>
@@ -66,16 +126,16 @@ export function MessageBubble({ message, onRetry }) {
               </button>
             )}
           </div>
-        )}
 
-        {/* Sources (collapsible) */}
-        {hasSources && showSources && (
-          <div className="source-cards" style={{ marginTop: "var(--space-2)" }}>
-            {message.sources.map((src, i) => (
-              <SourceCard key={i} source={src} index={i} />
-            ))}
-          </div>
-        )}
+          {/* Sources (collapsible) */}
+          {hasSources && showSources && (
+            <div className="source-cards" style={{ marginTop: "var(--space-3)" }}>
+              {message.sources.map((src, i) => (
+                <SourceCard key={i} source={src} index={i} />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -84,11 +144,18 @@ export function MessageBubble({ message, onRetry }) {
 export function TypingIndicator() {
   return (
     <div className="message-row assistant">
-      <div className="message-bubble assistant" style={{ padding: "var(--space-3) var(--space-4)" }}>
-        <div className="typing-indicator">
-          <div className="typing-dot" />
-          <div className="typing-dot" />
-          <div className="typing-dot" />
+      <div className="assistant-message-wrapper">
+        <div className="assistant-ai-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/>
+          </svg>
+        </div>
+        <div className="assistant-content">
+          <div className="typing-indicator">
+            <div className="typing-dot" />
+            <div className="typing-dot" />
+            <div className="typing-dot" />
+          </div>
         </div>
       </div>
     </div>

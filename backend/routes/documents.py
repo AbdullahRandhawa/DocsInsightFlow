@@ -1,9 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, status
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, status, BackgroundTasks
 from core.firebase import get_db
 from core.cloudinary_client import upload_pdf, delete_pdf
 from core.pinecone_client import upsert_vectors, delete_vectors_by_filter
 from modules.document_processor import chunk_document, get_page_count
 from modules.embeddings import embed_texts
+from modules.generator import generate_document_summary
 from routes.auth import get_current_user
 from schemas.document import (
     DocumentUploadResponse,
@@ -15,6 +16,7 @@ from core.config import settings
 import uuid
 import logging
 from datetime import datetime, timezone
+import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chats/{chat_id}/documents", tags=["Documents"])
@@ -33,14 +35,96 @@ def _ensure_chat_belongs_to_user(chat_id: str, uid: str) -> dict:
     return data
 
 
+def process_document_background(
+    chat_id: str,
+    doc_id: str,
+    public_id: str,
+    file_bytes: bytes,
+    filename: str,
+    chunk_size: int,
+):
+    """
+    Background task to process the document without blocking the user.
+    """
+    db = get_db()
+    try:
+        logger.info(f"Starting background processing for {filename} ({doc_id})")
+        
+        # 1. Upload to Cloudinary
+        cloudinary_result = upload_pdf(file_bytes, public_id=public_id, filename=filename)
+
+        # 2. Extract + chunk text
+        chunks = chunk_document(
+            file_bytes=file_bytes,
+            filename=filename,
+            chunk_size=chunk_size,
+            chunk_overlap=settings.DEFAULT_CHUNK_OVERLAP,
+        )
+        if not chunks:
+            logger.warning(f"No extractable text found in {filename}")
+            db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({"status": "failed", "error": "No extractable text"})
+            return
+
+        page_count = get_page_count(file_bytes, filename)
+
+        # 3. Generate Document Summary (First 3000 words max)
+        first_few_chunks = " ".join([c.text for c in chunks[:5]])
+        summary_text = generate_document_summary(first_few_chunks[:15000]) # roughly 3000 words
+
+        # 4. Generate embeddings
+        texts = [c.text for c in chunks]
+        embeddings = embed_texts(texts)
+
+        # 5. Prepare vectors for Pinecone
+        vectors = []
+        for chunk, embedding in zip(chunks, embeddings):
+            vectors.append(
+                {
+                    "id": f"{doc_id}_chunk_{chunk.chunk_id}",
+                    "values": embedding,
+                    "metadata": {
+                        "file_id": doc_id,
+                        "file_name": filename,
+                        "page": chunk.page,
+                        "chunk_id": chunk.chunk_id,
+                        "text": chunk.text,
+                    },
+                }
+            )
+
+        # 6. Upsert to Pinecone
+        upsert_vectors(namespace=chat_id, vectors=vectors)
+
+        # 7. Finalize Document in Firestore
+        now = datetime.now(timezone.utc).isoformat()
+        db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({
+            "cloudinaryUrl": cloudinary_result["url"],
+            "pageCount": page_count,
+            "chunkCount": len(chunks),
+            "summary": summary_text,
+            "status": "ready",
+            "updatedAt": now
+        })
+
+        logger.info(f"Document processing complete: '{filename}'")
+
+    except Exception as e:
+        logger.error(f"Background processing failed for {filename}: {e}")
+        try:
+            db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({"status": "failed", "error": str(e)})
+        except Exception:
+            pass
+
+
 @router.post("", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     chat_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     chunk_size: int = Form(default=500, ge=100, le=1000),
     current_user: dict = Depends(get_current_user),
 ):
-    """Upload a PDF, process it, embed it, and store vectors in Pinecone."""
+    """Upload endpoint that responds instantly while processing in background."""
     uid = current_user["uid"]
 
     # --- Validate ownership ---
@@ -51,7 +135,7 @@ async def upload_document(
     if ext not in ["pdf", "txt", "docx"]:
         raise HTTPException(status_code=400, detail="Only PDF, TXT, and DOCX files are accepted.")
 
-    # --- Read file bytes ---
+    # --- Read file bytes (must be done before returning) ---
     file_bytes = await file.read()
 
     # --- Validate file size ---
@@ -76,84 +160,50 @@ async def upload_document(
 
     doc_id = str(uuid.uuid4())
     public_id = f"chat_{chat_id}/{doc_id}"
+    now = datetime.now(timezone.utc).isoformat()
 
-    try:
-        # --- Upload to Cloudinary ---
-        cloudinary_result = upload_pdf(file_bytes, public_id=public_id, filename=file.filename)
+    # Create initial "processing" record in Firestore immediately
+    doc_data = {
+        "fileId": doc_id,
+        "fileName": file.filename,
+        "cloudinaryUrl": "",  # To be filled
+        "cloudinaryPublicId": public_id,
+        "pageCount": 0,       # To be filled
+        "chunkCount": 0,      # To be filled
+        "chunkSize": chunk_size,
+        "uploadedAt": now,
+        "status": "processing",
+        "userId": uid,
+    }
+    db.collection("chats").document(chat_id).collection("documents").document(doc_id).set(doc_data)
 
-        # --- Extract + chunk text ---
-        chunks = chunk_document(
-            file_bytes=file_bytes,
-            filename=file.filename,
-            chunk_size=chunk_size,
-            chunk_overlap=settings.DEFAULT_CHUNK_OVERLAP,
-        )
-        if not chunks:
-            raise HTTPException(status_code=422, detail="Document contains no extractable text.")
+    # Update chat document count
+    chat_ref = db.collection("chats").document(chat_id)
+    chat_ref.update({"documentCount": len(existing_docs) + 1, "updatedAt": now})
 
-        page_count = get_page_count(file_bytes, file.filename)
+    # Dispatch Background Task
+    background_tasks.add_task(
+        process_document_background,
+        chat_id=chat_id,
+        doc_id=doc_id,
+        public_id=public_id,
+        file_bytes=file_bytes,
+        filename=file.filename,
+        chunk_size=chunk_size
+    )
 
-        # --- Generate embeddings ---
-        texts = [c.text for c in chunks]
-        embeddings = embed_texts(texts)
+    logger.info(f"Dispatched background task for '{file.filename}'")
 
-        # --- Prepare vectors for Pinecone ---
-        vectors = []
-        for chunk, embedding in zip(chunks, embeddings):
-            vectors.append(
-                {
-                    "id": f"{doc_id}_chunk_{chunk.chunk_id}",
-                    "values": embedding,
-                    "metadata": {
-                        "file_id": doc_id,
-                        "file_name": file.filename,
-                        "page": chunk.page,
-                        "chunk_id": chunk.chunk_id,
-                        "text": chunk.text[:1000],  # Pinecone metadata limit
-                    },
-                }
-            )
-
-        # --- Upsert to Pinecone (namespace = chat_id) ---
-        upsert_vectors(namespace=chat_id, vectors=vectors)
-
-        # --- Save document metadata to Firestore ---
-        now = datetime.now(timezone.utc).isoformat()
-        doc_data = {
-            "fileId": doc_id,
-            "fileName": file.filename,
-            "cloudinaryUrl": cloudinary_result["url"],
-            "cloudinaryPublicId": public_id,
-            "pageCount": page_count,
-            "chunkCount": len(chunks),
-            "chunkSize": chunk_size,
-            "uploadedAt": now,
-            "status": "ready",
-            "userId": uid,
-        }
-        db.collection("chats").document(chat_id).collection("documents").document(doc_id).set(doc_data)
-
-        # --- Update chat document count ---
-        chat_ref = db.collection("chats").document(chat_id)
-        chat_ref.update({"documentCount": len(existing_docs) + 1, "updatedAt": now})
-
-        logger.info(f"Document '{file.filename}' uploaded: {len(chunks)} chunks → Pinecone namespace '{chat_id}'")
-
-        return DocumentUploadResponse(
-            doc_id=doc_id,
-            file_name=file.filename,
-            page_count=page_count,
-            chunk_count=len(chunks),
-            chunk_size=chunk_size,
-            cloudinary_url=cloudinary_result["url"],
-            uploaded_at=now,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Document upload failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    return DocumentUploadResponse(
+        doc_id=doc_id,
+        file_name=file.filename,
+        page_count=0,
+        chunk_count=0,
+        chunk_size=chunk_size,
+        cloudinary_url="",
+        uploaded_at=now,
+        status="processing",
+    )
 
 
 @router.get("", response_model=DocumentListResponse)

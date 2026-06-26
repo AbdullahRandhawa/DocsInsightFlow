@@ -19,7 +19,7 @@ from schemas.chat import (
 )
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Chats"])
@@ -187,6 +187,28 @@ def query_chat(
         answer = routing_result.get("response", "I'm here to help you analyze your documents.")
         sources = []
         has_context = False
+    elif routing_result.get("type") == "summary":
+        # Summary intent: fetch pre-generated summaries from Firestore
+        logger.info(f"Summary intent detected for query: '{query}'")
+        docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
+        
+        summaries = []
+        for d in docs_ref:
+            doc_data = d.to_dict()
+            if "summary" in doc_data and doc_data["summary"]:
+                summaries.append(f"Document Name: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
+                
+        if not summaries:
+            answer = "The documents have not finished processing their summaries, or no text was found."
+        else:
+            context = "\n\n---\n\n".join(summaries)
+            try:
+                answer = generate_answer(query=query, context=context, chat_history=chat_history)
+            except RuntimeError as e:
+                raise HTTPException(status_code=503, detail=str(e))
+                
+        sources = []
+        has_context = len(summaries) > 0
     else:
         # Search intent: use the optimized query for retrieval
         search_query = routing_result.get("optimized_query", query)
@@ -207,39 +229,61 @@ def query_chat(
         has_context = len(sources) > 0
         context = build_context_string(sources)
 
+        # --- Retrieve Global Summary ---
+        docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
+        summaries = []
+        for d in docs_ref:
+            doc_data = d.to_dict()
+            # If searching a specific file, only include its summary
+            if body.file_id and doc_data.get("fileId") != body.file_id:
+                continue
+            if "summary" in doc_data and doc_data["summary"]:
+                summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
+        
+        global_summary = "\n\n".join(summaries) if summaries else None
+
         # --- Generate Answer ---
         try:
-            answer = generate_answer(query=query, context=context, chat_history=chat_history)
+            answer = generate_answer(
+                query=query, 
+                context=context, 
+                chat_history=chat_history,
+                global_summary=global_summary
+            )
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e))
 
     # --- Build Source References ---
+    # Use core_text (the original matched chunk) for the excerpt display,
+    # not the expanded text which is only for LLM context.
     source_refs = [
         SourceReference(
             file_id=s["file_id"],
             file_name=s["file_name"],
             page=s["page"],
             score=s["score"],
-            excerpt=s["text"][:300],
+            excerpt=s.get("core_text", s["text"])[:300],
         )
         for s in sources
     ]
 
     # --- Save messages to Firestore ---
-    now = datetime.now(timezone.utc).isoformat()
+    user_now = datetime.now(timezone.utc)
+    ai_now = user_now + timedelta(milliseconds=10)
+    
     user_msg_id = str(uuid.uuid4())
     ai_msg_id = str(uuid.uuid4())
 
     messages_ref = chat_ref.collection("messages")
     messages_ref.document(user_msg_id).set(
-        {"messageId": user_msg_id, "role": "user", "content": query, "timestamp": now}
+        {"messageId": user_msg_id, "role": "user", "content": query, "timestamp": user_now.isoformat()}
     )
     messages_ref.document(ai_msg_id).set(
         {
             "messageId": ai_msg_id,
             "role": "assistant",
             "content": answer,
-            "timestamp": now,
+            "timestamp": ai_now.isoformat(),
             "sources": [s.model_dump() for s in source_refs],
             "querySettings": {
                 "topK": body.top_k,
@@ -249,16 +293,27 @@ def query_chat(
         }
     )
 
-    # --- Auto-generate title on first message ---
-    chat_data = chat.to_dict()
-    if chat_data.get("title") == "New Chat":
+    # --- Update Chat Metadata ---
+    chat_update_data = {"updatedAt": user_now.isoformat()}
+    
+    # If this is the very first message, set the chat title
+    if chat.to_dict().get("title") == "New Chat":
+        new_title = generate_chat_title(query)
+        chat_update_data["title"] = new_title
+
+    # If it's a new chat, try to link documents from a temp list
+    if not chat.to_dict().get("documents"):
         try:
-            title = generate_chat_title(query)
-            chat_ref.update({"title": title, "updatedAt": now})
+            pending_docs = db.collection("temp_docs").document(uid).get()
+            if pending_docs.exists:
+                docs_list = pending_docs.to_dict().get("docs", [])
+                for d in docs_list:
+                    # just move them over conceptually or copy them
+                    pass
         except Exception:
-            chat_ref.update({"updatedAt": now})
-    else:
-        chat_ref.update({"updatedAt": now})
+            pass
+
+    chat_ref.update(chat_update_data)
 
     # Logging block removed
 

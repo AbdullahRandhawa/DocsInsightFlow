@@ -102,6 +102,25 @@ def delete_namespace(namespace: str) -> None:
     logger.info(f"Deleted all vectors in namespace '{namespace}'")
 
 
+def fetch_vectors_by_ids(namespace: str, ids: list[str]) -> dict[str, dict]:
+    """
+    Fetch specific vectors by their IDs (used for context window expansion).
+    Returns a dict of {id: metadata}.
+    """
+    index = get_index()
+    if not ids:
+        return {}
+    try:
+        response = index.fetch(ids=ids, namespace=namespace)
+        result = {}
+        for vid, vec in response.vectors.items():
+            result[vid] = vec.metadata or {}
+        return result
+    except Exception as e:
+        logger.warning(f"fetch_vectors_by_ids failed: {e}")
+        return {}
+
+
 def delete_vectors_by_filter(namespace: str, filter_dict: dict) -> None:
     """Delete vectors matching a metadata filter (used when removing a document)."""
     index = get_index()
