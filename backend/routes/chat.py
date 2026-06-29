@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi.responses import StreamingResponse
 from core.firebase import get_db
 from core.pinecone_client import delete_namespace
 from modules.retriever import retrieve_relevant_chunks, build_context_string
-from modules.generator import generate_answer, generate_chat_title
-from modules.agentic_router import route_query
+from modules.generator import generate_chat_title
+from modules.rag_pipeline import execute_chat_pipeline, stream_chat_pipeline
 from routes.auth import get_current_user
 from schemas.chat import (
     CreateChatRequest,
@@ -179,79 +180,32 @@ def query_chat(
         for d in history_docs
     ]
 
-    # --- Intent Routing & Query Optimization ---
-    routing_result = route_query(query, chat_history)
+    # --- Retrieve Global Summary ---
+    # We fetch this unconditionally because the Generator needs it regardless of vector search
+    docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
+    summaries = []
+    for d in docs_ref:
+        doc_data = d.to_dict()
+        if body.file_id and doc_data.get("fileId") != body.file_id:
+            continue
+        if "summary" in doc_data and doc_data["summary"]:
+            summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
     
-    if routing_result.get("type") == "chat":
-        # Chitchat intent: bypass Pinecone and generation entirely
-        answer = routing_result.get("response", "I'm here to help you analyze your documents.")
-        sources = []
-        has_context = False
-    elif routing_result.get("type") == "summary":
-        # Summary intent: fetch pre-generated summaries from Firestore
-        logger.info(f"Summary intent detected for query: '{query}'")
-        docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
-        
-        summaries = []
-        for d in docs_ref:
-            doc_data = d.to_dict()
-            if "summary" in doc_data and doc_data["summary"]:
-                summaries.append(f"Document Name: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
-                
-        if not summaries:
-            answer = "The documents have not finished processing their summaries, or no text was found."
-        else:
-            context = "\n\n---\n\n".join(summaries)
-            try:
-                answer = generate_answer(query=query, context=context, chat_history=chat_history)
-            except RuntimeError as e:
-                raise HTTPException(status_code=503, detail=str(e))
-                
-        sources = []
-        has_context = len(summaries) > 0
-    else:
-        # Search intent: use the optimized query for retrieval
-        search_query = routing_result.get("optimized_query", query)
-        logger.info(f"Original query: '{query}' | Optimized query: '{search_query}'")
-        
-        # --- RAG Retrieval ---
-        try:
-            sources = retrieve_relevant_chunks(
-                chat_id=chat_id,
-                query=search_query,
-                top_k=body.top_k,
-                threshold=body.threshold,
-                file_id=body.file_id,
-            )
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+    global_summary = "\n\n".join(summaries) if summaries else None
 
-        has_context = len(sources) > 0
-        context = build_context_string(sources)
-
-        # --- Retrieve Global Summary ---
-        docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
-        summaries = []
-        for d in docs_ref:
-            doc_data = d.to_dict()
-            # If searching a specific file, only include its summary
-            if body.file_id and doc_data.get("fileId") != body.file_id:
-                continue
-            if "summary" in doc_data and doc_data["summary"]:
-                summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
-        
-        global_summary = "\n\n".join(summaries) if summaries else None
-
-        # --- Generate Answer ---
-        try:
-            answer = generate_answer(
-                query=query, 
-                context=context, 
-                chat_history=chat_history,
-                global_summary=global_summary
-            )
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+    # --- Execute RAG Pipeline ---
+    try:
+        answer, sources = execute_chat_pipeline(
+            query=query,
+            chat_history=chat_history,
+            global_summary=global_summary,
+            chat_id=chat_id,
+            top_k=body.top_k,
+            threshold=body.threshold,
+            file_id=body.file_id
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     # --- Build Source References ---
     # Use core_text (the original matched chunk) for the excerpt display,
@@ -317,6 +271,7 @@ def query_chat(
 
     # Logging block removed
 
+    has_context = len(source_refs) > 0
     logger.info(f"Query answered: {len(source_refs)} sources, has_context={has_context}")
 
     return QueryResponse(
@@ -325,6 +280,139 @@ def query_chat(
         query=query,
         message_id=ai_msg_id,
         has_context=has_context,
+    )
+
+
+# ─── Streaming Endpoint ───────────────────────────────────────────────────────
+
+@router.post("/chats/{chat_id}/stream")
+def stream_chat(
+    chat_id: str,
+    body: QueryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Streaming RAG pipeline via Server-Sent Events.
+    Yields JSON events: status | token | done | error.
+    Firestore persistence is triggered when the 'done' event fires.
+    """
+    uid = current_user["uid"]
+    db = get_db()
+
+    chat_ref = db.collection("chats").document(chat_id)
+    chat = chat_ref.get()
+    if not chat.exists:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    if chat.to_dict().get("userId") != uid:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    # --- Chat history ---
+    history_docs = (
+        chat_ref.collection("messages")
+        .order_by("timestamp", direction="ASCENDING")
+        .limit_to_last(12)
+        .get()
+    )
+    chat_history = [
+        {"role": d.to_dict().get("role"), "content": d.to_dict().get("content")}
+        for d in history_docs
+    ]
+
+    # --- Global Summary ---
+    docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
+    summaries = []
+    for d in docs_ref:
+        doc_data = d.to_dict()
+        if body.file_id and doc_data.get("fileId") != body.file_id:
+            continue
+        if "summary" in doc_data and doc_data["summary"]:
+            summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
+    global_summary = "\n\n".join(summaries) if summaries else None
+
+    def event_stream():
+        import json
+        full_answer_parts = []
+        final_sources = []
+        has_context = False
+
+        try:
+            for event_str in stream_chat_pipeline(
+                query=query,
+                chat_history=chat_history,
+                global_summary=global_summary,
+                chat_id=chat_id,
+                top_k=body.top_k,
+                threshold=body.threshold,
+                file_id=body.file_id,
+            ):
+                # Parse event to accumulate the full answer and capture done metadata
+                if event_str.startswith("data: "):
+                    try:
+                        ev = json.loads(event_str[6:])
+                        if ev.get("type") == "token":
+                            full_answer_parts.append(ev.get("text", ""))
+                        elif ev.get("type") == "done":
+                            final_sources = ev.get("sources", [])
+                            has_context = ev.get("has_context", False)
+                    except json.JSONDecodeError:
+                        pass
+
+                yield event_str
+
+        except Exception as e:
+            logger.error(f"[Stream] Unexpected error in event_stream: {e}")
+            yield f'data: {{"type": "error", "message": "Internal server error"}}\n\n'
+            return
+
+        # --- Persist to Firestore after stream completes ---
+        try:
+            full_answer = "".join(full_answer_parts)
+            now = datetime.now(timezone.utc)
+            ai_now = now + timedelta(milliseconds=10)
+            user_msg_id = str(uuid.uuid4())
+            ai_msg_id = str(uuid.uuid4())
+
+            messages_ref = chat_ref.collection("messages")
+            messages_ref.document(user_msg_id).set(
+                {"messageId": user_msg_id, "role": "user", "content": query, "timestamp": now.isoformat()}
+            )
+            messages_ref.document(ai_msg_id).set(
+                {
+                    "messageId": ai_msg_id,
+                    "role": "assistant",
+                    "content": full_answer,
+                    "timestamp": ai_now.isoformat(),
+                    "sources": final_sources,
+                    "querySettings": {
+                        "topK": body.top_k,
+                        "threshold": body.threshold,
+                        "fileId": body.file_id,
+                    },
+                }
+            )
+
+            chat_update = {"updatedAt": now.isoformat()}
+            if chat.to_dict().get("title") == "New Chat":
+                chat_update["title"] = generate_chat_title(query)
+            chat_ref.update(chat_update)
+
+            # Send final event with message_id so frontend can track the message
+            yield f'data: {{"type": "saved", "message_id": "{ai_msg_id}", "user_message_id": "{user_msg_id}"}}\n\n'
+
+        except Exception as e:
+            logger.error(f"[Stream] Firestore save failed: {e}")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
