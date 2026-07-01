@@ -405,82 +405,7 @@ emit({"type": "done", "sources": [...], "has_context": true})
 emit({"type": "error", "message": "Failed to search documents. Please try again."})
 ```
 
-#### Backpressure Handling Strategy
 
-**1. HTTP Streaming Timeout Protection** (rag_pipeline.py, lines 333–351)
-```python
-with httpx.stream(
-    method="POST",
-    url="https://openrouter.ai/api/v1/chat/completions",
-    ...
-    timeout=60.0,  # ← 60-second timeout for slow LLM
-) as response:
-    response.raise_for_status()
-    for line in response.iter_lines():  # ← Iterates as data arrives
-        ...
-```
-
-**2. Generator-Based Streaming** (rag_pipeline.py, lines 321–364)
-```python
-def stream_generate_answer(query, context, chat_history, global_summary):
-    """
-    Generator that yields tokens as they arrive.
-    Client can process tokens incrementally without buffering entire response.
-    """
-    with httpx.stream(...) as response:
-        for line in response.iter_lines():
-            if line.startswith("data: "):
-                chunk = json.loads(line[6:])
-                text = chunk["choices"][0].get("delta", {}).get("content")
-                if text:
-                    yield text  # ← Yield individual token
-```
-
-**3. Client-Side Event Processing** (routes/chat.py, lines 336–364)
-```python
-def event_stream():
-    full_answer_parts = []  # ← Buffer tokens as they arrive
-    final_sources = []
-    
-    try:
-        for event_str in stream_chat_pipeline(...):
-            # Process each event without blocking
-            if event_str.startswith("data: "):
-                try:
-                    ev = json.loads(event_str[6:])
-                    
-                    if ev.get("type") == "token":
-                        # Accumulate token for Firestore persistence
-                        full_answer_parts.append(ev.get("text", ""))
-                    
-                    elif ev.get("type") == "done":
-                        # Capture metadata from done event
-                        final_sources = ev.get("sources", [])
-                        has_context = ev.get("has_context", False)
-                
-                except json.JSONDecodeError:
-                    pass  # ← Gracefully skip malformed events
-            
-            yield event_str  # ← Send to client immediately
-```
-
-**4. Post-Stream Persistence** (routes/chat.py, lines 371–407)
-```python
-# After streaming completes, accumulate tokens and save
-try:
-    full_answer = "".join(full_answer_parts)  # ← Reconstruct from tokens
-    
-    # Save to Firestore
-    messages_ref.document(ai_msg_id).set({
-        "messageId": ai_msg_id,
-        "role": "assistant",
-        "content": full_answer,  # ← Full reconstructed answer
-        "timestamp": ai_now.isoformat(),
-        "sources": final_sources,
-    })
-    
-    yield f'data: {{"type": "saved", "message_id": "{ai_msg_id}"}}\n\n'
-```
 
 #### Backpressure Resilience Features
 
@@ -493,33 +418,7 @@ try:
 | **Post-Stream Persistence** | Firestore write after completion | Resilient to network interruptions during streaming |
 | **Status Events** | Intermediate "Searching...", "Found X sources" | User feedback during long operations |
 
-#### Client Integration Example
 
-```javascript
-// Frontend receives SSE stream
-const eventSource = new EventSource(`/api/v1/chats/${chatId}/stream`);
-
-eventSource.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  
-  if (data.type === "status") {
-    // Show loading message
-    setStatus(data.message);
-  } else if (data.type === "token") {
-    // Append token to response in real-time
-    setResponse(prev => prev + data.text);
-  } else if (data.type === "done") {
-    // Display sources
-    setSources(data.sources);
-    eventSource.close();
-  } else if (data.type === "error") {
-    // Handle errors
-    setError(data.message);
-  }
-};
-```
-
----
 
 ## 📊 Configuration & Tuning
 
@@ -645,4 +544,4 @@ For issues or questions:
 
 ---
 
-**Built with ❤️ by Abdullah Randhawa**
+**Built by Abdullah Naeem**
