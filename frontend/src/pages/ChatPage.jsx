@@ -17,6 +17,8 @@ export function ChatPage() {
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isQuerying, setIsQuerying] = useState(false);
+  // { status: string|null, content: string, tempId: string|null }
+  const [streamingState, setStreamingState] = useState(null);
 
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -59,6 +61,8 @@ export function ChatPage() {
       setChats(res.data.chats);
       if (res.data.chats.length > 0 && !activeChatId && !pendingNewChat) {
         setActiveChatId(res.data.chats[0].chat_id);
+      } else if (res.data.chats.length === 0 && !activeChatId && !pendingNewChat) {
+        handleNewChat();
       }
     } catch {
       toast.error("Failed to load chats");
@@ -69,13 +73,17 @@ export function ChatPage() {
 
   const loadMessagesAndDocs = async (chatId) => {
     setLoadingMessages(true);
-    setMessages([]); // Clear immediately to avoid stale temp messages showing
+    // Preserve optimistic temp messages (like the user's first prompt in a new chat)
+    setMessages((prev) => prev.filter((m) => m._temp));
     try {
       const [msgRes, docRes] = await Promise.all([
         chatApi.getMessages(chatId),
         documentsApi.list(chatId),
       ]);
-      setMessages(msgRes.data.messages);
+      setMessages((prev) => {
+        const tempMsgs = prev.filter((m) => m._temp);
+        return [...msgRes.data.messages, ...tempMsgs];
+      });
       setDocuments(docRes.data.documents);
     } catch {
       toast.error("Failed to load chat data");
@@ -132,9 +140,19 @@ export function ChatPage() {
   };
 
   const handleSend = async (query, fileId = null) => {
+    // Show user bubble immediately — don't wait for chat creation
+    const tempId = `temp-${Date.now()}`;
+    const userMsg = { message_id: tempId, role: "user", content: query, _temp: true };
+    setMessages((prev) => [...prev, userMsg]);
+    setStreamingState({ status: "Thinking...", content: "", tempId });
+
     const chatId = await ensureChatExists();
-    if (!chatId) return;
-    await performQuery(chatId, query, fileId);
+    if (!chatId) {
+      setMessages((prev) => prev.filter((m) => m.message_id !== tempId));
+      setStreamingState(null);
+      return;
+    }
+    await performQuery(chatId, query, fileId, { tempId, userMsg });
   };
 
   const handleUploadClick = async () => {
@@ -144,43 +162,69 @@ export function ChatPage() {
     setShowUploadModal(true);
   };
 
-  const performQuery = async (chatId, query, fileId = null) => {
-    const tempId = `temp-${Date.now()}`;
-    // Optimistically add the user message
-    const userMsg = { message_id: tempId, role: "user", content: query, _temp: true };
-    setMessages((prev) => [...prev, userMsg]);
+  // existingTemp: { tempId, userMsg } — passed by handleSend when bubble is pre-added
+  const performQuery = async (chatId, query, fileId = null, existingTemp = null) => {
+    const tempId = existingTemp?.tempId || `temp-${Date.now()}`;
+    const userMsg = existingTemp?.userMsg || { message_id: tempId, role: "user", content: query, _temp: true };
+
+    if (!existingTemp) {
+      // Retry path — add the bubble now
+      setMessages((prev) => [...prev, userMsg]);
+    }
+
     setIsQuerying(true);
+    setStreamingState({ status: "Thinking...", content: "", tempId });
+
+    // Local accumulator — avoids reading state inside a state updater (Strict Mode double-invoke bug)
+    let streamedContent = "";
+
     try {
-      const res = await chatApi.query(chatId, {
-        query,
-        top_k: topK,
-        threshold,
-        file_id: fileId || undefined,
-      });
-      const aiMsg = {
-        message_id: res.data.message_id,
-        role: "assistant",
-        content: res.data.answer,
-        sources: res.data.sources,
-        has_context: res.data.has_context,
-        _query: query,
-        _fileId: fileId,
-      };
-      // Replace the temp user message with a permanent one + assistant reply
-      setMessages((prev) => {
-        const withoutTemp = prev.filter((m) => m.message_id !== tempId);
-        // Avoid duplicating if message already exists (e.g. from a reload)
-        const alreadyHasAI = withoutTemp.some((m) => m.message_id === aiMsg.message_id);
-        const permanentUser = { ...userMsg, message_id: `user-${res.data.message_id}`, _temp: false };
-        return alreadyHasAI
-          ? withoutTemp
-          : [...withoutTemp, permanentUser, aiMsg];
-      });
-      loadChats();
+      await chatApi.stream(
+        chatId,
+        { query, top_k: topK, threshold, file_id: fileId || undefined },
+        {
+          onStatus: (msg) =>
+            setStreamingState((s) => s ? { ...s, status: msg } : s),
+
+          onToken: (text) => {
+            streamedContent += text;
+            setStreamingState((s) => s ? { ...s, status: null, content: streamedContent } : s);
+          },
+
+          onDone: () => {},
+
+          onSaved: (ev) => {
+            const aiMsg = {
+              message_id: ev.message_id,
+              role: "assistant",
+              content: streamedContent,
+              sources: [],
+              has_context: false,
+              _query: query,
+              _fileId: fileId,
+            };
+            const permanentUser = { ...userMsg, message_id: `user-${ev.user_message_id}`, _temp: false };
+            setMessages((prev) => {
+              const withoutTemp = prev.filter((m) => m.message_id !== tempId);
+              return [...withoutTemp, permanentUser, aiMsg];
+            });
+            setStreamingState(null);
+            setIsQuerying(false);
+            loadChats();
+          },
+
+          onError: (err) => {
+            toast.error(err.message || "Failed to get answer");
+            setMessages((prev) => prev.filter((m) => m.message_id !== tempId));
+            setStreamingState(null);
+            setIsQuerying(false);
+          },
+        }
+      );
     } catch (err) {
       toast.error(err.message || "Failed to get answer");
       setMessages((prev) => prev.filter((m) => m.message_id !== tempId));
-    } finally {
+      setStreamingState(null);
       setIsQuerying(false);
     }
   };
@@ -221,34 +265,45 @@ export function ChatPage() {
           <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
             <ChatWindow
               messages={messages}
-              isLoading={loadingMessages || isQuerying}
+              isLoading={loadingMessages}
+              streamingState={streamingState}
               hasDocuments={documents.length > 0}
               onRetry={handleRetry}
+              onSend={handleSend}
+              onUploadClick={handleUploadClick}
             />
 
             {showSettings && (
-              <div style={{
-                margin: "0 var(--space-6) var(--space-3)",
-                padding: "var(--space-4)",
-                background: "var(--color-bg-secondary)",
-                border: "1px solid var(--color-border)",
-                borderRadius: "var(--radius-lg)",
-                boxShadow: "var(--shadow-md)"
-              }}>
-                <SettingsPanel
-                  topK={topK}
-                  threshold={threshold}
-                  onTopKChange={setTopK}
-                  onThresholdChange={setThreshold}
+              <>
+                <div 
+                  style={{ position: "fixed", inset: 0, zIndex: 10 }}
+                  onClick={() => setShowSettings(false)}
                 />
-              </div>
+                <div style={{
+                  position: "relative",
+                  zIndex: 11,
+                  margin: "0 var(--space-6) var(--space-3)",
+                  padding: "var(--space-4)",
+                  background: "var(--color-bg-secondary)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: "var(--radius-lg)",
+                  boxShadow: "var(--shadow-md)"
+                }}>
+                  <SettingsPanel
+                    topK={topK}
+                    threshold={threshold}
+                    onTopKChange={setTopK}
+                    onThresholdChange={setThreshold}
+                  />
+                </div>
+              </>
             )}
 
             <ChatInput
               onSend={handleSend}
               onUploadClick={handleUploadClick}
               onSettingsClick={() => setShowSettings(!showSettings)}
-              disabled={isQuerying}
+              disabled={isQuerying || !!streamingState}
               documents={documents}
             />
           </div>

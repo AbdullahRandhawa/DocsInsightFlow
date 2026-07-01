@@ -1,6 +1,9 @@
 export function SettingsPanel({ topK, threshold, onTopKChange, onThresholdChange }) {
   return (
     <div className="settings-panel" id="settings-panel">
+      <div style={{ width: "100%", marginBottom: "var(--space-2)", fontSize: "var(--text-sm)", fontWeight: "600", color: "var(--color-text-primary)" }}>
+        Retrieval Settings
+      </div>
       <div className="settings-group">
         <span className="settings-group-label">🔍 Top-K</span>
         <div className="slider-group">
@@ -34,10 +37,6 @@ export function SettingsPanel({ topK, threshold, onTopKChange, onThresholdChange
           <span className="slider-value">{threshold.toFixed(2)}</span>
         </div>
       </div>
-
-      <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>
-        Retrieval settings
-      </span>
     </div>
   );
 }

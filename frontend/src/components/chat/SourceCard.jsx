@@ -15,8 +15,8 @@ export function SourceCard({ source, index }) {
           <span className="source-card-file-name">{source.file_name}</span>
         </div>
         <div className="source-card-meta">
-          <span className="source-card-page">p.{source.page}</span>
-          <ScoreBadge score={source.score} />
+          <span className="source-card-page">Page {source.page}</span>
+          <span style={{fontSize: "11px", color: "var(--color-text-muted)"}}>Relevance:</span> <ScoreBadge score={source.score} />
         </div>
       </div>
       <p className="source-card-excerpt">"{source.excerpt}"</p>

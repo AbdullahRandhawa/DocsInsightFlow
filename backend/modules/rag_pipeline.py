@@ -389,6 +389,9 @@ def stream_chat_pipeline(
 
     logger.info(f"[Stream] Starting pipeline for query: '{query[:80]}'")
 
+    # Emit an immediate status to assure the user the backend is processing
+    yield emit({"type": "status", "message": "Analyzing query..."})
+
     # ── 1. Gatekeeper ──────────────────────────────────────────────────────────
     routing_result = route_query(query, chat_history, global_summary)
     needs_vector_search = routing_result.get("needs_vector_search", True)

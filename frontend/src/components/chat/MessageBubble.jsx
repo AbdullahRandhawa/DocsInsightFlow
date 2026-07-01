@@ -8,6 +8,7 @@ export function MessageBubble({ message, onRetry }) {
   const isUser = message.role === "user";
   const [showSources, setShowSources] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content);
@@ -18,17 +19,35 @@ export function MessageBubble({ message, onRetry }) {
   const hasSources = !isUser && message.sources && message.sources.length > 0;
 
   if (isUser) {
+    // A "line" is either a \n or ~80 chars of wrapped text
+    const lines = message.content.split("\n");
+    const isLong = lines.length > 5 || message.content.length > 300;
+
+    let displayContent = message.content;
+    if (isLong && !expanded) {
+      displayContent = lines.slice(0, 5).join("\n");
+      if (displayContent.length > 300) {
+        displayContent = displayContent.slice(0, 300);
+      }
+      displayContent += "...";
+    }
+
     return (
       <div className="message-row user" id={`msg-${message.message_id}`}>
         <div className="user-message-wrapper">
           <div className="user-message-bubble">
-            {message.content}
+            {displayContent}
           </div>
           <div className="msg-actions user-msg-actions">
             <button className="msg-action-btn" onClick={handleCopy} title="Copy">
               {copied ? <Check size={13} /> : <Copy size={13} />}
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
+            {isLong && (
+              <button className="msg-action-btn" onClick={() => setExpanded(!expanded)} title={expanded ? "Show less" : "Show more"}>
+                <span>{expanded ? "Show less" : "Show more"}</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -146,6 +165,66 @@ export function TypingIndicator() {
             <div className="typing-dot" />
             <div className="typing-dot" />
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function StreamingBubble({ status, content }) {
+  const hasContent = content && content.length > 0;
+
+  return (
+    <div className="message-row assistant">
+      <div className="assistant-message-wrapper">
+        <div className="assistant-content">
+          {/* Phase 1: status pill only (no tokens yet) */}
+          {!hasContent && status && (
+            <div className="stream-status-pill">
+              <span className="stream-status-dot" />
+              <span className="stream-status-text">{status}</span>
+            </div>
+          )}
+
+          {/* Phase 2: content streaming in, no cursor — pill shows below */}
+          {hasContent && (
+            <div className="assistant-markdown streaming-content">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  code({ node, className, children, ...props }) {
+                    const match = /language-(\w+)/.exec(className || "");
+                    const isBlock = match || String(children).includes("\n");
+                    if (isBlock) {
+                      return (
+                        <div className="code-block-wrapper">
+                          <div className="code-block-header">
+                            <span className="code-block-lang">{match ? match[1] : "code"}</span>
+                          </div>
+                          <pre className="code-block"><code className={className} {...props}>{children}</code></pre>
+                        </div>
+                      );
+                    }
+                    return <code className="inline-code" {...props}>{children}</code>;
+                  },
+                  table({ children }) { return <div className="md-table-wrapper"><table className="md-table">{children}</table></div>; },
+                  th({ children }) { return <th className="md-th">{children}</th>; },
+                  td({ children }) { return <td className="md-td">{children}</td>; },
+                  p({ children }) { return <p className="md-p">{children}</p>; },
+                  ul({ children }) { return <ul className="md-ul">{children}</ul>; },
+                  ol({ children }) { return <ol className="md-ol">{children}</ol>; },
+                  li({ children }) { return <li className="md-li">{children}</li>; },
+                  h1({ children }) { return <h1 className="md-h1">{children}</h1>; },
+                  h2({ children }) { return <h2 className="md-h2">{children}</h2>; },
+                  h3({ children }) { return <h3 className="md-h3">{children}</h3>; },
+                  blockquote({ children }) { return <blockquote className="md-blockquote">{children}</blockquote>; },
+                }}
+              >
+                {content}
+              </ReactMarkdown>
+            </div>
+          )}
+
         </div>
       </div>
     </div>

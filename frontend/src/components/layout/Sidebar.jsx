@@ -7,19 +7,10 @@ import toast from "react-hot-toast";
 function formatChatTime(isoString) {
   if (!isoString) return "";
   const date = new Date(isoString);
-  const now = new Date();
-  const diffMs = now - date;
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffDays === 0) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } else if (diffDays === 1) {
-    return "Yesterday";
-  } else if (diffDays < 7) {
-    return date.toLocaleDateString([], { weekday: "short" });
-  } else {
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
+  const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const month = date.toLocaleDateString('en-US', { month: 'short' });
+  const day = date.getDate();
+  return `${time}  ${month}-${day}`;
 }
 
 export function Sidebar({ chats, activeChatId, pendingNewChat, onSelectChat, onNewChat, onDeleteChat, loading }) {
@@ -57,7 +48,7 @@ export function Sidebar({ chats, activeChatId, pendingNewChat, onSelectChat, onN
           <div className="sidebar-logo-icon">
             <FileText size={16} color="#fff" />
           </div>
-          <span className="sidebar-logo-text">DocsInsight</span>
+          <span className="sidebar-logo-text">DocsInsightFlow</span>
         </div>
       </div>
 
