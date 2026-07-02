@@ -184,10 +184,13 @@ def query_chat(
     # We fetch this unconditionally because the Generator needs it regardless of vector search
     docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
     summaries = []
+    selected_file_name = None
     for d in docs_ref:
         doc_data = d.to_dict()
         if body.file_id and doc_data.get("fileId") != body.file_id:
             continue
+        if body.file_id and doc_data.get("fileId") == body.file_id:
+            selected_file_name = doc_data.get("fileName", "Unknown")
         if "summary" in doc_data and doc_data["summary"]:
             summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
     
@@ -202,7 +205,8 @@ def query_chat(
             chat_id=chat_id,
             top_k=body.top_k,
             threshold=body.threshold,
-            file_id=body.file_id
+            file_id=body.file_id,
+            selected_file_name=selected_file_name,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -325,10 +329,13 @@ def stream_chat(
     # --- Global Summary ---
     docs_ref = chat_ref.collection("documents").where("status", "==", "ready").get()
     summaries = []
+    selected_file_name = None
     for d in docs_ref:
         doc_data = d.to_dict()
         if body.file_id and doc_data.get("fileId") != body.file_id:
             continue
+        if body.file_id and doc_data.get("fileId") == body.file_id:
+            selected_file_name = doc_data.get("fileName", "Unknown")
         if "summary" in doc_data and doc_data["summary"]:
             summaries.append(f"Document: {doc_data.get('fileName', 'Unknown')}\nSummary: {doc_data['summary']}")
     global_summary = "\n\n".join(summaries) if summaries else None
@@ -348,6 +355,7 @@ def stream_chat(
                 top_k=body.top_k,
                 threshold=body.threshold,
                 file_id=body.file_id,
+                selected_file_name=selected_file_name,
             ):
                 # Parse event to accumulate the full answer and capture done metadata
                 if event_str.startswith("data: "):

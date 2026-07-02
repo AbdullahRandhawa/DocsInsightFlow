@@ -96,10 +96,23 @@ def query_vectors(
 
 
 def delete_namespace(namespace: str) -> None:
-    """Delete all vectors in a namespace (used when deleting a chat)."""
+    """Delete all vectors in a namespace (used when deleting a chat).
+    
+    If the namespace doesn't exist in Pinecone (e.g., no documents were ever
+    uploaded to this chat), the error is silently handled — the chat is still
+    deleted from Firestore.
+    """
     index = get_index()
-    index.delete(delete_all=True, namespace=namespace)
-    logger.info(f"Deleted all vectors in namespace '{namespace}'")
+    try:
+        index.delete(delete_all=True, namespace=namespace)
+        logger.info(f"Deleted all vectors in namespace '{namespace}'")
+    except Exception as e:
+        # Pinecone throws 404 "Namespace not found" if no vectors were ever
+        # upserted to this namespace — treat as success since there's nothing
+        # to delete.
+        logger.warning(
+            f"Pinecone namespace '{namespace}' may not exist (no-op): {e}"
+        )
 
 
 def fetch_vectors_by_ids(namespace: str, ids: list[str]) -> dict[str, dict]:

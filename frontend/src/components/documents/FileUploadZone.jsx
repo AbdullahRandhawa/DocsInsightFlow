@@ -43,7 +43,6 @@ export function FileUploadZone({ chatId, documents, onDocumentAdded, onDocumentR
         setUploadProgress("Extracting & embedding text...");
         const res = await documentsApi.upload(chatId, formData);
         onDocumentAdded(res.data);
-        toast.success(`"${file.name}" processed — ${res.data.chunk_count} chunks created`);
       } catch (err) {
         toast.error(err.message || "Upload failed");
       } finally {

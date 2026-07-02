@@ -12,6 +12,7 @@ backend/venv/
 backend/env/
 backend/.venv/
 backend/.pytest_cache/
+backend/hello.py
 
 # Environment Variables
 backend/.env

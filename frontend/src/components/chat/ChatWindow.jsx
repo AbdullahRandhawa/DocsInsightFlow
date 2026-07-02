@@ -78,7 +78,7 @@ export function ChatWindow({ messages, isLoading, streamingState, hasDocuments, 
         <MessageBubble
           key={msg.message_id}
           message={msg}
-          onRetry={msg.role === "assistant" && onRetry ? () => onRetry(i) : null}
+          onRetry={msg.role === "assistant" && onRetry ? () => onRetry(msg.message_id) : null}
         />
       ))}
       {isLoading && !streamingState && <TypingIndicator />}

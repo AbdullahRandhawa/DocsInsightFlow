@@ -9,75 +9,114 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 # ROUTER PROMPT
 # ──────────────────────────────────────────────────────────────────────────────
-ROUTER_PROMPT = """SYSTEM: You are the core traffic controller for DocsInsightFlow, a high-performance document intelligence SaaS. Your job is to determine if the user's latest message requires a vector database retrieval (Pinecone) to get specific facts, or if it can be answered immediately using the existing context.
+ROUTER_PROMPT = """SYSTEM: You are the first-response engine for DocsInsightFlow, a document intelligence SaaS.
+
+Your job has TWO parts:
+1. Generate a brief, engaging preliminary response to the user.
+2. Decide if vector search is needed, and output a machine-readable decision.
 
 You are provided with:
-1. The Global Document Summary (high-level overview of the entire file).
-2. The Live Chat History (the context of what has already been said).
-3. The New User Message.
+- Global Document Summary (high-level overview of the uploaded file)
+- Chat History (recent conversation context)
+- User's message
+- Selected Document Name (if the user has clicked/filtered to a specific document, its name is shown here)
 
-CRITICAL EVALUATION LOGIC:
-- SET "needs_vector_search" TO false ONLY IF:
-  * The user is making small talk, greeting you, saying thanks, or asking meta-questions about the app itself.
-  * The user is asking a high-level macro question perfectly covered by the Global Document Summary.
-  * The user is asking a direct follow-up to information that is completely visible within the recent Chat History. If the text in the history already contains 100% of the answer, do not search.
-  **IF FALSE: You MUST generate the final answer yourself in the "response" field based on the Summary and History.**
+── PART 1: PRELIMINARY RESPONSE ──
+Generate a brief preliminary response. This is NOT the final answer. It should:
+- Acknowledge the user's query
+- Provide 1-5 lines of relevant context from the Summary (if available and relevant)
+- Signal your next action ("Let me search the documents for the exact details..." or "Let me check the document...")
 
-- SET "needs_vector_search" TO true IF:
-  * The user is asking for specific facts, metrics, tools, names, technical architecture, rules, or data points that require diving deep into the document's chunks.
-  * AMBIGUITY RULE: If you are at all uncertain whether the history/summary contains the full answer, ALWAYS default to true.
+EXAMPLES of good preliminary responses:
+- "You're asking about the business model. From the summary, I can see the project uses a freemium model with subscription tiers for sellers. Let me search the document for the exact details on pricing..."
+- "You want to know about the in-scope items. The summary mentions 7 deliverables including AI search and real-time chat. Let me find the specific breakdown in your document..."
+- "Great question! Let me search your documents for information about [topic]..."
 
-QUERY REWRITING RULES (Only execute if "needs_vector_search" is true):
-- Strip out conversational fluff.
-- Resolve all pronouns (it, this, that, they) using the Chat History.
-- MANDATORY: Preserve all technical proper nouns exactly as written.
-- Expand vague terminology into domain-specific keywords.
+IMPORTANT RULES for preliminary response:
+- DO NOT write a complete, detailed answer. Save the details for after the search.
+- DO NOT list all items or explain in depth. Give just enough context to engage the user.
+- If the Summary has relevant content: briefly reference it (1-4 lines) then say you'll search for specifics.
+- If the Summary has no relevant content: simply acknowledge and say you'll search.
+- If no Summary is provided at all (no document uploaded): say "Please upload a document so I can help you analyze it."
+- Keep it to 1-5 lines max. Then append the routing decision.
 
-OUTPUT FORMAT:
-Return raw JSON only. No markdown formatting blocks, no backticks, no explanations. 
+── PART 2: ROUTING DECISION (machine block) ──
+After your preliminary response (and ONLY after it), append this exact block:
 
-Expected JSON Structure:
-{
-  "needs_vector_search": true,
-  "optimized_query": "Standalone query string with resolved pronouns and preserved entities"
-}
-OR
-{
-  "needs_vector_search": false,
-  "response": "Your full, complete, generated answer to the user's message, drawn from the Global Summary and Chat History."
-}
+---ROUTER_DECISION---
+{"needs_vector_search": true/false, "optimized_query": "..."}
+---END_ROUTER_DECISION---
+
+DECISION RULES:
+- SET "needs_vector_search" TO false ONLY IF the user is:
+  * Making small talk, greeting, saying thanks
+  * Asking meta-questions about the app itself ("what can you do?", "how do you work?")
+  * Asking for a joke, code help, or general advice unrelated to documents
+  * Asking you to elaborate on something just discussed in chat history (follow-up, no new info needed)
+  * If no Global Summary is provided (no document uploaded) — also set to false, preliminary response should tell user to upload
+
+- SET "needs_vector_search" TO true for EVERYTHING else:
+  * Any question about the uploaded documents
+  * Specific facts, metrics, names, architecture, rules, data points
+  * Comparisons, lists, or details that need precise document context
+  * When in doubt, ALWAYS default to true
+
+QUERY REWRITING (only when needs_vector_search is true):
+- Strip conversational fluff
+- Resolve pronouns using Chat History
+- Preserve technical proper nouns exactly
+
+CRITICAL OUTPUT RULES:
+- The preliminary response MUST come FIRST (natural text)
+- The ---ROUTER_DECISION--- block MUST come LAST
+- The JSON inside the block must be valid, parseable JSON
+- Do NOT include any text after the ---END_ROUTER_DECISION--- marker
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
 # GENERATOR PROMPT
 # ──────────────────────────────────────────────────────────────────────────────
-GENERATOR_PROMPT = """You are DocsInsightFlow, an expert document analysis assistant. Your primary goal is to find answers within the provided context, even if they are buried or phrased differently than the user's question.
+GENERATOR_PROMPT = """You are DocsInsightFlow — a document intelligence assistant.
+Your purpose: Analyze uploaded documents (PDFs, DOCX, text) and answer questions about their content.
+Your capabilities: Semantic search across documents, cross-document synthesis, page-level citations, sentiment analysis.
+Your limitations: You can only answer based on the documents provided.
 
 You will receive:
-1. <GLOBAL_SUMMARY>: A structured overview of the document(s).
-2. <CONTEXT_BLOCKS>: Specific excerpts retrieved via vector search.
+1. <GLOBAL_SUMMARY>: A structured overview of the document(s). May be empty if no document is uploaded.
+2. <CONTEXT_BLOCKS>: Specific excerpts retrieved via vector search. May be empty.
 3. Chat History: Recent conversational context.
+4. The PRELIMINARY RESPONSE (the brief overview that was already shown to the user)
 
+IMPORTANT CONTEXT:
+- The user has already seen a brief preliminary response (1-5 lines) based on the summary.
+- Your job is to provide the DETAILED, SPECIFIC answer using the context blocks.
+- DO NOT re-introduce or repeat what was already said in the preliminary response.
+- Start directly with new, deeper details from the context blocks.
+
+NO-DOCUMENT HANDLING:
+- If no Global Summary and no Context Blocks are provided: there is no document uploaded.
+- In this case, if the user is asking about documents, respond: "It looks like you haven't uploaded a document yet. Please upload a PDF, DOCX, or text file, and I'll be happy to help you analyze it!"
+- If the user is asking a general question (greeting, coding help, etc.), answer helpfully using your general knowledge, then add a brief reminder about your document-analysis purpose.
 
 GENERAL KNOWLEDGE CLAUSE:
-- If the user's message is a general question (a greeting, a request for coding help, a conceptual question, etc.) that has absolutely no connection to the uploaded documents, you are permitted to answer it helpfully using your general knowledge.
-- HOWEVER, after giving the answer, you MUST add a short, friendly reminder at the end. For example: "By the way, my core purpose is to help you analyze and extract insights from your uploaded documents. Feel free to ask me anything about them!"
-- Never refuse to answer a general question outright. Always be helpful first, then redirect.
+- If the user's message is a general question (greeting, coding help, conceptual question) with no connection to documents, answer helpfully using your general knowledge.
+- [IMPORTENT]: After giving the answer, add a short reminder like: "By the way, my core purpose is to help you analyze and extract insights from your uploaded documents. Feel free to ask me anything about them!"
+- Never refuse a general question. Be helpful first, then redirect.
 
 YOUR ANALYSIS PROCESS:
-1. DEEP SEARCH: Read every single word of the <CONTEXT_BLOCKS> and <GLOBAL_SUMMARY>. Look for synonyms, related concepts, or partial matches to the user's query. You must try hard to find the answer.
-2. SYNTHESIZE: Combine information from multiple blocks or the summary to form a complete answer. If the user asks for a list (like tools or requirements), extract every single item you can find.
-3. FALLBACK: ONLY if you have exhaustively searched the context and the answer is truly, 100% missing, politely inform the user that the specific information wasn't found in the retrieved sections of the document. Then, act as a helpful guide: suggest they try rephrasing the question with different keywords, or mention they can adjust the search settings (like lowering the threshold or increasing top_k) to cast a wider net. Do NOT use a robotic, hardcoded response.
+1. DEEP SEARCH: Read every word of <CONTEXT_BLOCKS> and <GLOBAL_SUMMARY>. Look for synonyms, related concepts, partial matches.
+2. SYNTHESIZE: Combine info from multiple blocks. Extract every item if the user asks for a list.
+3. FALLBACK: Only if the answer is truly 100% missing, politely inform the user and suggest rephrasing.
 
 STRICT RULES:
-- Rely strictly on the provided context. Do NOT invent facts.
-- Answer comprehensively. Do not summarize or truncate lists if the user asks for them.
-- Naturally reference the document name and page number if using <CONTEXT_BLOCKS>, but do NOT mention "context blocks", "chunk IDs", or "relevance scores" in your output.
-- Treat the <GLOBAL_SUMMARY> and <CONTEXT_BLOCKS> as your absolute ground truth.
+- Rely strictly on provided context. Do NOT invent facts.
+- Answer comprehensively. Do not truncate lists.
+- Naturally reference document name and page if using <CONTEXT_BLOCKS>, but never mention "context blocks", "chunk IDs", or "relevance scores".
+- Treat <GLOBAL_SUMMARY> and <CONTEXT_BLOCKS> as ground truth.
 
 FORMATTING RULES:
-- BE VISUAL: If you are listing multiple items, requirements, tools, comparisons, or structured data, PROACTIVELY format them as a Markdown Table. Do not wait for the user to ask for a table.
-- CODE: If you are outputting any code, JSON, or commands, ALWAYS wrap them in standard Markdown code blocks (```language) so they render correctly in the UI.
+- BE VISUAL: Use Markdown Tables for lists, comparisons, or structured data.
+- CODE: Wrap code, JSON, or commands in ```language blocks.
 """
 
 
@@ -85,13 +124,16 @@ FORMATTING RULES:
 # PIPELINE FUNCTIONS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def route_query(query: str, chat_history: list[dict] | None = None, global_summary: str | None = None) -> dict:
+def route_query(query: str, chat_history: list[dict] | None = None, global_summary: str | None = None, selected_file_name: str | None = None) -> dict:
     """
-    The central intelligence router (Gatekeeper).
+    The central intelligence router (Gatekeeper) — blocking version.
+    Used by execute_chat_pipeline() for non-streaming path.
     """
     system_prompt = ROUTER_PROMPT
     if global_summary:
         system_prompt += f"\n\n--- GLOBAL DOCUMENT SUMMARY ---\n{global_summary}\n-------------------------------"
+    if selected_file_name:
+        system_prompt += f"\n\n--- SELECTED DOCUMENT ---\nThe user has selected/filtered to this specific document: {selected_file_name}\nOnly answer about this document.\n-------------------------------"
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -100,7 +142,7 @@ def route_query(query: str, chat_history: list[dict] | None = None, global_summa
 
     messages.append({
         "role": "user",
-        "content": f"Classify this message and respond with JSON only:\n\n{query}"
+        "content": query
     })
 
     try:
@@ -122,6 +164,12 @@ def route_query(query: str, chat_history: list[dict] | None = None, global_summa
         data = response.json()
         raw_output = data["choices"][0]["message"]["content"].strip()
 
+        # Extract the JSON decision block
+        decision = _extract_router_decision(raw_output)
+        if decision:
+            return decision
+
+        # Fallback: try parsing entire output as JSON (backward compat)
         if raw_output.startswith("```json"):
             raw_output = raw_output[7:]
         elif raw_output.startswith("```"):
@@ -131,7 +179,7 @@ def route_query(query: str, chat_history: list[dict] | None = None, global_summa
 
         result = json.loads(raw_output.strip())
         needs_search = result.get("needs_vector_search", True)
-        
+
         final_result = {
             "needs_vector_search": bool(needs_search),
             "optimized_query": result.get("optimized_query") if needs_search else None,
@@ -155,6 +203,162 @@ def route_query(query: str, chat_history: list[dict] | None = None, global_summa
     except Exception as e:
         logger.error(f"[Gatekeeper] Routing failed, defaulting to search: {e}")
         return {"needs_vector_search": True, "optimized_query": query}
+
+
+def _extract_router_decision(raw_text: str) -> dict | None:
+    """
+    Extract the routing decision JSON from the ---ROUTER_DECISION--- block.
+    Returns None if the marker is not found.
+    """
+    marker_start = "---ROUTER_DECISION---"
+    marker_end = "---END_ROUTER_DECISION---"
+
+    start_idx = raw_text.find(marker_start)
+    end_idx = raw_text.find(marker_end)
+
+    if start_idx != -1 and end_idx != -1:
+        json_str = raw_text[start_idx + len(marker_start):end_idx].strip()
+        try:
+            result = json.loads(json_str)
+            needs_search = result.get("needs_vector_search", True)
+            return {
+                "needs_vector_search": bool(needs_search),
+                "optimized_query": result.get("optimized_query") if needs_search else None,
+                "response": result.get("response") if not needs_search else None,
+                "_preliminary": raw_text[:start_idx].strip()
+            }
+        except json.JSONDecodeError:
+            logger.warning(f"[Router] Found marker but JSON parse failed: {json_str[:100]}")
+            return None
+
+    return None
+
+
+def stream_router_response(
+    query: str,
+    chat_history: list[dict] | None = None,
+    global_summary: str | None = None,
+    selected_file_name: str | None = None,
+):
+    """
+    Streaming router that:
+    1. Yields preliminary response tokens immediately (engages the user)
+    2. Detects the ---ROUTER_DECISION--- marker mid-stream
+    3. Yields a special dict {'__ROUTER_DECISION__': {...}} as the final item
+
+    Usage:
+        for item in stream_router_response(query, chat_history, summary):
+            if isinstance(item, dict) and '__ROUTER_DECISION__' in item:
+                decision = item['__ROUTER_DECISION__']
+                break
+            # item is a text token — stream to frontend
+            yield item
+    """
+    system_prompt = ROUTER_PROMPT
+    if global_summary:
+        system_prompt += f"\n\n--- GLOBAL DOCUMENT SUMMARY ---\n{global_summary}\n-------------------------------"
+    if selected_file_name:
+        system_prompt += f"\n\n--- SELECTED DOCUMENT ---\nThe user has selected/filtered to this specific document: {selected_file_name}\nOnly answer about this document.\n-------------------------------"
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if chat_history:
+        messages.extend(chat_history[-6:])
+    messages.append({"role": "user", "content": query})
+
+    MARKER = "---ROUTER_DECISION---"
+    SAFE_WINDOW = len(MARKER)  # 20 chars — rolling buffer size
+
+    buffer = ""
+    past_marker = False
+    decision_buffer = ""
+
+    try:
+        with httpx.stream(
+            method="POST",
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.OPENROUTER_MODEL,
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": 1024,
+                "stream": True,
+            },
+            timeout=15.0,
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or line == "data: [DONE]":
+                    continue
+                if line.startswith("data: "):
+                    payload = line[6:]
+                    try:
+                        chunk = json.loads(payload)
+                        text = chunk["choices"][0].get("delta", {}).get("content")
+                        if not text:
+                            continue
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+
+                    if past_marker:
+                        decision_buffer += text
+                    else:
+                        buffer += text
+                        # Check if marker appeared in the buffer
+                        marker_pos = buffer.find(MARKER)
+                        if marker_pos != -1:
+                            # Yield any remaining preliminary text before the marker
+                            pre = buffer[:marker_pos]
+                            if pre:
+                                yield pre
+                            # Switch to decision-buffering mode
+                            past_marker = True
+                            decision_buffer = buffer[marker_pos + len(MARKER):]
+                        else:
+                            # Safe to yield the oldest part of the buffer
+                            if len(buffer) > SAFE_WINDOW:
+                                safe_end = len(buffer) - SAFE_WINDOW
+                                yield buffer[:safe_end]
+                                buffer = buffer[safe_end:]
+
+    except Exception as e:
+        logger.error(f"[StreamRouter] API error: {e}")
+        # Yield whatever we have as preliminary, then default decision
+        if buffer:
+            yield buffer
+        yield {"__ROUTER_DECISION__": {"needs_vector_search": True, "optimized_query": query}}
+        return
+
+    # Parse the decision from the buffered text after the marker
+    end_marker = "---END_ROUTER_DECISION---"
+    end_pos = decision_buffer.find(end_marker)
+
+    if end_pos != -1:
+        json_str = decision_buffer[:end_pos].strip()
+        try:
+            result = json.loads(json_str)
+            needs_search = result.get("needs_vector_search", True)
+            decision = {
+                "needs_vector_search": bool(needs_search),
+                "optimized_query": result.get("optimized_query") if needs_search else None,
+                "response": result.get("response") if not needs_search else None,
+            }
+            logger.info(
+                f"[StreamRouter] needs_search={decision['needs_vector_search']} | "
+                f"query='{query[:80]}'"
+                + (f" | optimized='{decision['optimized_query'][:80]}'" if decision['needs_vector_search'] else "")
+            )
+            yield {"__ROUTER_DECISION__": decision}
+            return
+        except json.JSONDecodeError as e:
+            logger.error(f"[StreamRouter] JSON parse error in decision block: {e} | json='{json_str[:200]}'")
+
+    # Fallback: default to search
+    logger.warning("[StreamRouter] No valid decision found, defaulting to search")
+    yield {"__ROUTER_DECISION__": {"needs_vector_search": True, "optimized_query": query}}
 
 
 def generate_answer(
@@ -196,7 +400,7 @@ def generate_answer(
             )
         else:
             user_content_parts.append(
-                "<CONTEXT_BLOCKS>\nThis is a follow-up question. No new document chunks were retrieved.\nUse the conversation history above to answer the question accurately.\n</CONTEXT_BLOCKS>\n"
+                "<CONTEXT_BLOCKS>\nNo document is uploaded. No chunks were retrieved.\n</CONTEXT_BLOCKS>\n"
             )
 
     user_content_parts.append(f"\nQUESTION: {query}")
@@ -238,16 +442,17 @@ def execute_chat_pipeline(
     chat_id: str,
     top_k: int,
     threshold: float,
-    file_id: str | None
+    file_id: str | None,
+    selected_file_name: str | None = None,
 ) -> tuple[str, list]:
     """
-    Master orchestration function for the RAG pipeline.
+    Master orchestration function for the RAG pipeline (blocking).
     Returns: (final_answer_string, source_references_list)
     """
     logger.info(f"[Pipeline] Starting execution for query: '{query[:80]}'")
     
     # 1. Intent Routing (Gatekeeper)
-    routing_result = route_query(query, chat_history, global_summary)
+    routing_result = route_query(query, chat_history, global_summary, selected_file_name)
     needs_vector_search = routing_result.get("needs_vector_search", True)
 
     sources = []
@@ -282,7 +487,8 @@ def execute_chat_pipeline(
     else:
         # Zero-roundtrip response directly from the Gatekeeper LLM
         logger.info(f"[Pipeline] Vector search bypassed | Answer generated directly by Gatekeeper")
-        answer = routing_result.get("response", "I could not generate a response based on the current context.")
+        # Use preliminary response if available, otherwise fallback
+        answer = routing_result.get("_preliminary") or routing_result.get("response", "I could not generate a response based on the current context.")
         
     return answer, sources
 
@@ -311,7 +517,7 @@ def _build_generator_messages(
         if has_summary:
             parts.append("<CONTEXT_BLOCKS>\nNo specific chunks were retrieved. Please rely on the GLOBAL_SUMMARY above.\n</CONTEXT_BLOCKS>\n")
         else:
-            parts.append("<CONTEXT_BLOCKS>\nFollow-up question. No new chunks retrieved. Use the conversation history above.\n</CONTEXT_BLOCKS>\n")
+            parts.append("<CONTEXT_BLOCKS>\nNo document uploaded. No chunks retrieved.\n</CONTEXT_BLOCKS>\n")
 
     parts.append(f"\nQUESTION: {query}")
     messages.append({"role": "user", "content": "\n".join(parts)})
@@ -372,6 +578,7 @@ def stream_chat_pipeline(
     top_k: int,
     threshold: float,
     file_id: str | None,
+    selected_file_name: str | None = None,
 ):
     """
     Master streaming orchestrator. Yields SSE-ready JSON strings.
@@ -392,18 +599,43 @@ def stream_chat_pipeline(
     # Emit an immediate status to assure the user the backend is processing
     yield emit({"type": "status", "message": "Analyzing query..."})
 
-    # ── 1. Gatekeeper ──────────────────────────────────────────────────────────
-    routing_result = route_query(query, chat_history, global_summary)
-    needs_vector_search = routing_result.get("needs_vector_search", True)
+    # ── 1. Stream Router (Gatekeeper) — yields tokens immediately ──────────────
+    #    The router streams a preliminary response while simultaneously deciding
+    #    if vector search is needed. The decision comes as the last item.
+    routing_decision = None
+    router_streamed_something = False
 
+    for item in stream_router_response(query, chat_history, global_summary):
+        if isinstance(item, dict) and "__ROUTER_DECISION__" in item:
+            routing_decision = item["__ROUTER_DECISION__"]
+            break
+        # Regular text token — stream to frontend immediately
+        router_streamed_something = True
+        yield emit({"type": "token", "text": item})
+
+    if routing_decision is None:
+        routing_decision = {"needs_vector_search": True, "optimized_query": query}
+
+    needs_vector_search = routing_decision.get("needs_vector_search", True)
     sources = []
     context = ""
+
+    # If no document uploaded (no global_summary) and needs_vector_search is true,
+    # we can't search. Override to false and provide guidance.
+    if needs_vector_search and not global_summary:
+        logger.info("[Stream] No document uploaded — skipping search, telling user to upload")
+        yield emit({"type": "status", "message": "No document found. Please upload a document first."})
+        # If router didn't stream anything, provide a fallback message
+        if not router_streamed_something:
+            yield emit({"type": "token", "text": "Please upload a document so I can help you analyze it."})
+        yield emit({"type": "done", "sources": [], "has_context": False})
+        return
 
     if needs_vector_search:
         # ── 2. Status event ────────────────────────────────────────────────────
         yield emit({"type": "status", "message": "Searching your documents..."})
 
-        search_query = routing_result.get("optimized_query") or query
+        search_query = routing_decision.get("optimized_query") or query
         logger.info(f"[Stream] Vector search required | Optimized: '{search_query[:80]}'")
 
         try:
@@ -423,7 +655,7 @@ def stream_chat_pipeline(
         if sources:
             yield emit({"type": "status", "message": f"Found {len(sources)} relevant section{'s' if len(sources) != 1 else ''}. Generating answer..."})
 
-        # ── 3. Stream Generator LLM tokens ─────────────────────────────────────
+        # ── 3. Stream Generator LLM tokens (seamless continuation) ─────────────
         try:
             for token in stream_generate_answer(
                 query=query,
@@ -438,13 +670,15 @@ def stream_chat_pipeline(
             return
 
     else:
-        # ── Zero-roundtrip: stream the Gatekeeper's ready answer ───────────────
-        logger.info("[Stream] Vector search bypassed | Streaming Gatekeeper response")
-        direct_answer = routing_result.get("response", "I could not generate a response based on the current context.")
-        # Emit in small chunks for a smooth streaming feel
-        chunk_size = 4
-        for i in range(0, len(direct_answer), chunk_size):
-            yield emit({"type": "token", "text": direct_answer[i:i + chunk_size]})
+        # ── No search needed — router already streamed the preliminary answer ──
+        logger.info("[Stream] Vector search bypassed | Router streamed the answer")
+        # If router didn't stream anything (edge case), use the response field
+        if not router_streamed_something:
+            direct_answer = routing_decision.get("response", "")
+            if direct_answer:
+                chunk_size = 4
+                for i in range(0, len(direct_answer), chunk_size):
+                    yield emit({"type": "token", "text": direct_answer[i:i + chunk_size]})
 
     # ── 4. Done ────────────────────────────────────────────────────────────────
     serializable_sources = [

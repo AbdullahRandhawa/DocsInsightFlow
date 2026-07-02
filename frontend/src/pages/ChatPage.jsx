@@ -22,8 +22,8 @@ export function ChatPage() {
 
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [topK, setTopK] = useState(5);
-  const [threshold, setThreshold] = useState(0.5);
+  const [topK, setTopK] = useState(Number(import.meta.env.VITE_DEFAULT_TOP_K) || 8);
+  const [threshold, setThreshold] = useState(Number(import.meta.env.VITE_DEFAULT_THRESHOLD) || 0.3);
 
   // Track if we're already creating a chat to prevent double-creation
   const creatingChatRef = useRef(false);
@@ -177,6 +177,9 @@ export function ChatPage() {
 
     // Local accumulator — avoids reading state inside a state updater (Strict Mode double-invoke bug)
     let streamedContent = "";
+    // Capture sources from the "done" SSE event
+    let streamSources = [];
+    let streamHasContext = false;
 
     try {
       await chatApi.stream(
@@ -191,15 +194,18 @@ export function ChatPage() {
             setStreamingState((s) => s ? { ...s, status: null, content: streamedContent } : s);
           },
 
-          onDone: () => {},
+          onDone: (ev) => {
+            streamSources = ev.sources || [];
+            streamHasContext = ev.has_context || false;
+          },
 
           onSaved: (ev) => {
             const aiMsg = {
               message_id: ev.message_id,
               role: "assistant",
               content: streamedContent,
-              sources: [],
-              has_context: false,
+              sources: streamSources,
+              has_context: streamHasContext,
               _query: query,
               _fileId: fileId,
             };
@@ -229,11 +235,34 @@ export function ChatPage() {
     }
   };
 
-  const handleRetry = (assistantIndex) => {
-    const msg = messages[assistantIndex];
-    if (!msg || msg.role !== "assistant") return;
-    setMessages((prev) => prev.filter((_, i) => i !== assistantIndex));
-    performQuery(activeChatId, msg._query, msg._fileId || null);
+  const handleRetry = (msgId) => {
+    const msgIndex = messages.findIndex((m) => m.message_id === msgId);
+    if (msgIndex === -1) return;
+    const msg = messages[msgIndex];
+    if (msg.role !== "assistant") return;
+
+    // Find the preceding user message to extract the original query
+    const userMsg = msgIndex > 0 && messages[msgIndex - 1].role === "user"
+      ? messages[msgIndex - 1]
+      : null;
+
+    if (!userMsg) {
+      toast.error("Cannot retry: original prompt not found");
+      return;
+    }
+
+    // Remove both messages
+    setMessages((prev) => prev.filter(
+      (m) => m.message_id !== msgId && m.message_id !== userMsg.message_id
+    ));
+
+    if (!activeChatId) {
+      toast.error("No active chat");
+      return;
+    }
+
+    // Re-run the pipeline with the original user prompt
+    performQuery(activeChatId, userMsg.content, null);
   };
 
   const handleDocumentAdded = (doc) => {
@@ -243,6 +272,11 @@ export function ChatPage() {
       return exists ? prev.map((d) => (d.doc_id === doc.doc_id ? doc : d)) : [...prev, doc];
     });
     if (doc.status === "ready") loadChats();
+  };
+
+  const handleDocumentRemoved = (docId) => {
+    setDocuments((prev) => prev.filter((d) => d.doc_id !== docId));
+    loadChats();
   };
 
   // Chat UI shows when we have an active chat OR a pending new chat
@@ -275,7 +309,7 @@ export function ChatPage() {
 
             {showSettings && (
               <>
-                <div 
+                <div
                   style={{ position: "fixed", inset: 0, zIndex: 10 }}
                   onClick={() => setShowSettings(false)}
                 />
@@ -305,6 +339,8 @@ export function ChatPage() {
               onSettingsClick={() => setShowSettings(!showSettings)}
               disabled={isQuerying || !!streamingState}
               documents={documents}
+              chatId={activeChatId}
+              onDocumentRemoved={handleDocumentRemoved}
             />
           </div>
         ) : (

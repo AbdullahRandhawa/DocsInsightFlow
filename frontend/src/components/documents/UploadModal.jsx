@@ -55,7 +55,6 @@ export function UploadModal({ chatId, documents, onDocumentAdded, onClose }) {
       const res = await documentsApi.upload(chatId, formData);
       // Replace temp doc with the real one from the server
       onDocumentAdded(res.data);
-      toast.success(`"${selectedFile.name}" uploaded — processing in background`);
     } catch (err) {
       toast.error(err.message || "Upload failed");
     }

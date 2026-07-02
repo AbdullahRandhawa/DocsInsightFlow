@@ -141,6 +141,23 @@ def chunk_document(
     return chunks
 
 
+def extract_raw_text(file_bytes: bytes, filename: str) -> str:
+    """
+    Extract all text from a document file and return as a single string.
+    No chunking — used for summary generation.
+    """
+    ext = filename.split(".")[-1].lower()
+    if ext == "pdf":
+        pages = extract_text_from_pdf(file_bytes)
+        return "\n\n".join(p["text"] for p in pages)
+    elif ext == "docx":
+        return extract_text_from_docx(file_bytes)
+    elif ext == "txt":
+        return extract_text_from_txt(file_bytes)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+
 def get_page_count(file_bytes: bytes, filename: str) -> int:
     """Return page count for PDFs, or 1 for other documents."""
     ext = filename.split(".")[-1].lower()

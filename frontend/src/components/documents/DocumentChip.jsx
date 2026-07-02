@@ -1,4 +1,4 @@
-import { FileText, X } from "lucide-react";
+import { FileText, X, Loader2 } from "lucide-react";
 import { documentsApi } from "../../lib/api";
 import { useState } from "react";
 import toast from "react-hot-toast";
@@ -7,7 +7,6 @@ export function DocumentChip({ doc, chatId, onRemove }) {
   const [removing, setRemoving] = useState(false);
 
   const handleRemove = async () => {
-    if (!confirm(`Remove "${doc.file_name}" from this chat?`)) return;
     setRemoving(true);
     try {
       await documentsApi.delete(chatId, doc.doc_id);
@@ -20,6 +19,36 @@ export function DocumentChip({ doc, chatId, onRemove }) {
     }
   };
 
+  const confirmRemove = () => {
+    toast(
+      (t) => (
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <span>Remove <strong>{doc.file_name}</strong> from this chat?</span>
+          <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+            <button
+              className="btn btn-sm"
+              onClick={() => toast.dismiss(t.id)}
+              style={{ fontSize: "0.8rem" }}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn-sm btn-danger"
+              onClick={() => {
+                toast.dismiss(t.id);
+                handleRemove();
+              }}
+              style={{ fontSize: "0.8rem" }}
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      ),
+      { duration: 10000 }
+    );
+  };
+
   return (
     <div className="doc-chip" title={doc.file_name}>
       <FileText size={12} className="doc-chip-icon" />
@@ -29,11 +58,11 @@ export function DocumentChip({ doc, chatId, onRemove }) {
       </span>
       <button
         className="doc-chip-remove"
-        onClick={handleRemove}
+        onClick={confirmRemove}
         disabled={removing}
         title="Remove document"
       >
-        {removing ? <div className="spinner spinner-sm" /> : <X size={11} />}
+        {removing ? <Loader2 size={11} className="spin" /> : <X size={11} />}
       </button>
     </div>
   );

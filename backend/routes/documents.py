@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, s
 from core.firebase import get_db
 from core.cloudinary_client import upload_pdf, delete_pdf
 from core.pinecone_client import upsert_vectors, delete_vectors_by_filter
-from modules.document_processor import chunk_document, get_page_count
+from modules.document_processor import chunk_document, get_page_count, extract_raw_text
 from modules.embeddings import embed_texts
 from modules.generator import generate_document_summary
 from routes.auth import get_current_user
@@ -35,7 +35,7 @@ def _ensure_chat_belongs_to_user(chat_id: str, uid: str) -> dict:
     return data
 
 
-def process_document_background(
+async def process_document_background(
     chat_id: str,
     doc_id: str,
     public_id: str,
@@ -45,73 +45,102 @@ def process_document_background(
 ):
     """
     Background task to process the document without blocking the user.
+    Three branches run in parallel:
+      1. Cloudinary upload (network I/O)
+      2. Chunk → Embed → Pinecone upsert
+      3. Extract raw text → LLM summary
+    Firestore is updated to "ready" only when ALL three complete.
     """
     db = get_db()
     try:
         logger.info(f"Starting background processing for {filename} ({doc_id})")
-        
-        # 1. Upload to Cloudinary
-        cloudinary_result = upload_pdf(file_bytes, public_id=public_id, filename=filename)
 
-        # 2. Extract + chunk text
-        chunks = chunk_document(
-            file_bytes=file_bytes,
-            filename=filename,
-            chunk_size=chunk_size,
-            chunk_overlap=settings.DEFAULT_CHUNK_OVERLAP,
-        )
-        if not chunks:
-            logger.warning(f"No extractable text found in {filename}")
-            db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({"status": "failed", "error": "No extractable text"})
-            return
+        # ── Define the three parallel branches ──
 
-        page_count = get_page_count(file_bytes, filename)
-
-        # 3. Generate Document Summary (First 3000 words max)
-        first_few_chunks = " ".join([c.text for c in chunks[:5]])
-        summary_text = generate_document_summary(first_few_chunks[:15000]) # roughly 3000 words
-
-        # 4. Generate embeddings
-        texts = [c.text for c in chunks]
-        embeddings = embed_texts(texts)
-
-        # 5. Prepare vectors for Pinecone
-        vectors = []
-        for chunk, embedding in zip(chunks, embeddings):
-            vectors.append(
-                {
-                    "id": f"{doc_id}_chunk_{chunk.chunk_id}",
-                    "values": embedding,
-                    "metadata": {
-                        "file_id": doc_id,
-                        "file_name": filename,
-                        "page": chunk.page,
-                        "chunk_id": chunk.chunk_id,
-                        "text": chunk.text,
-                    },
-                }
+        async def branch_cloudinary() -> dict:
+            """Upload file bytes to Cloudinary (runs in thread to avoid blocking)."""
+            return await asyncio.to_thread(
+                upload_pdf, file_bytes, public_id=public_id, filename=filename
             )
 
-        # 6. Upsert to Pinecone
-        upsert_vectors(namespace=chat_id, vectors=vectors)
+        async def branch_pinecone() -> dict:
+            """Extract → chunk → embed → upsert to Pinecone (runs in thread to avoid blocking)."""
+            chunks = await asyncio.to_thread(
+                chunk_document,
+                file_bytes=file_bytes,
+                filename=filename,
+                chunk_size=chunk_size,
+                chunk_overlap=settings.DEFAULT_CHUNK_OVERLAP,
+            )
+            if not chunks:
+                raise ValueError("No extractable text")
 
-        # 7. Finalize Document in Firestore
+            texts = [c.text for c in chunks]
+            embeddings = await asyncio.to_thread(embed_texts, texts)
+
+            vectors = []
+            for chunk, embedding in zip(chunks, embeddings):
+                vectors.append(
+                    {
+                        "id": f"{doc_id}_chunk_{chunk.chunk_id}",
+                        "values": embedding,
+                        "metadata": {
+                            "file_id": doc_id,
+                            "file_name": filename,
+                            "page": chunk.page,
+                            "chunk_id": chunk.chunk_id,
+                            "text": chunk.text,
+                        },
+                    }
+                )
+
+            await asyncio.to_thread(upsert_vectors, namespace=chat_id, vectors=vectors)
+            page_count = await asyncio.to_thread(get_page_count, file_bytes, filename)
+            return {"chunkCount": len(chunks), "pageCount": page_count}
+
+        async def branch_summary() -> str:
+            """Extract raw text → generate LLM summary."""
+            raw_text = await asyncio.to_thread(extract_raw_text, file_bytes, filename)
+            summary = await generate_document_summary(raw_text)
+            return summary
+
+        # ── Run all three branches in parallel ──
+        cloudinary_result, pinecone_result, summary_text = await asyncio.gather(
+            branch_cloudinary(),
+            branch_pinecone(),
+            branch_summary(),
+            return_exceptions=True,
+        )
+
+        # ── Check for any failures ──
+        if isinstance(cloudinary_result, Exception):
+            raise cloudinary_result
+        if isinstance(pinecone_result, Exception):
+            raise pinecone_result
+        if isinstance(summary_text, Exception):
+            raise summary_text
+
+        # ── Finalize Document in Firestore (all branches succeeded) ──
         now = datetime.now(timezone.utc).isoformat()
         db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({
             "cloudinaryUrl": cloudinary_result["url"],
-            "pageCount": page_count,
-            "chunkCount": len(chunks),
+            "pageCount": pinecone_result["pageCount"],
+            "chunkCount": pinecone_result["chunkCount"],
             "summary": summary_text,
             "status": "ready",
-            "updatedAt": now
+            "updatedAt": now,
         })
 
         logger.info(f"Document processing complete: '{filename}'")
 
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"Background processing failed for {filename}: {e}")
         try:
-            db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({"status": "failed", "error": str(e)})
+            db.collection("chats").document(chat_id).collection("documents").document(doc_id).update({
+                "status": "failed",
+                "error": error_msg[:500],
+            })
         except Exception:
             pass
 
