@@ -225,6 +225,14 @@ export function StreamingBubble({ status, content }) {
             </div>
           )}
 
+          {/* Phase 3: pill below content while status events arrive (searching, analyzing, etc.) */}
+          {hasContent && status && (
+            <div className="stream-status-pill stream-generating-pill">
+              <span className="stream-status-dot" />
+              <span className="stream-status-text">{status}</span>
+            </div>
+          )}
+
         </div>
       </div>
     </div>
